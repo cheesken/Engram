@@ -13,8 +13,8 @@ The demo (`demo/`) is not assigned here — it's a separate effort once the core
 **Your files:**
 - `engram/vector_clock.py` — implement all 5 methods
 - `engram/crdt.py` — implement all 5 methods/properties
-- `tests/test_vector_clock.py` — fill all 12 test stubs
-- `tests/test_crdt.py` — fill all 13 test stubs
+- `tests/test_vector_clock.py` — 12 tests (1 example provided, 11 stubs to fill)
+- `tests/test_crdt.py` — 13 tests (1 example provided, 12 stubs to fill)
 
 **No dependencies on other groups.** Your modules only import from `engram/models.py` which is already complete.
 
@@ -57,8 +57,8 @@ pytest tests/test_vector_clock.py tests/test_crdt.py -v
 **Your files:**
 - `engram/access_control.py` — implement all 5 methods
 - `engram/storage/memory.py` — implement all 7 methods
-- `tests/test_access_control.py` — fill all 10 test stubs
-- `tests/test_storage.py` — fill all 9 test stubs
+- `tests/test_access_control.py` — 10 tests (1 example provided, 9 stubs to fill)
+- `tests/test_storage.py` — 10 tests (1 example provided, 9 stubs to fill)
 
 **No dependencies on other groups.** AccessPolicy uses only `fnmatch` (stdlib). InMemoryAdapter uses only `engram/models.py` and Python dicts.
 
@@ -105,7 +105,7 @@ pytest tests/test_access_control.py tests/test_storage.py -v
 **Your files:**
 - `engram/history.py` — implement all 5 methods
 - `engram/storage/redis_adapter.py` — implement all 7 methods
-- `tests/test_history.py` — fill all 10 test stubs
+- `tests/test_history.py` — 11 tests (1 example provided, 10 stubs to fill)
 - New: add Redis-specific tests to `tests/test_storage.py` or a new `tests/test_redis.py`
 
 **Dependencies:** `history.py` uses `VectorClock.compare()` and `VectorClock.from_dict()` from Group 1. You can mock these while waiting — they return an `Ordering` enum, easy to stub. `redis_adapter.py` has no dependency on other groups.
@@ -189,7 +189,7 @@ docker compose up -d && pytest tests/test_redis.py -v
   2. Build `VectorClock.from_dict(request.vector_clock)`
   3. `clock.increment(request.agent_id)`
   4. `storage.read(key)` to get existing entry
-  5. If existing: `VectorClock(existing.vector_clock).compare(incoming_clock)`
+  5. If existing: `VectorClock.from_dict(existing.vector_clock).compare(incoming_clock)`
      - BEFORE or EQUAL → safe to overwrite
      - AFTER → stale write → raise HTTPException(409)
      - CONCURRENT → conflict:
@@ -197,7 +197,7 @@ docker compose up -d && pytest tests/test_redis.py -v
        - Call `resolve(request.conflict_strategy)`
        - Set `status=CONFLICTED` if values remain
        - Set `status=FLAGGED` if strategy is FLAG_FOR_HUMAN
-  6. Merge clocks: `incoming.merge(VectorClock(existing.vector_clock))`
+  6. Merge clocks: `incoming.merge(VectorClock.from_dict(existing.vector_clock))`
   7. Build final `MemoryEntry`
   8. Build `HistoryEntry`, call `history_log.append()`
   9. Call `storage.write(entry)`

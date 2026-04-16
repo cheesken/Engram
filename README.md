@@ -145,7 +145,7 @@ curl "http://localhost:8000/read/budget?agent_id=summarizer-1&role=summarizer"
 ### Install
 
 ```bash
-git clone <repo-url> && cd engram
+git clone <repo-url> && cd Engram
 pip install -r requirements.txt
 cp .env.example .env
 ```
@@ -202,8 +202,8 @@ Engram uses a pluggable storage layer. All adapters implement `StorageAdapter`:
 |---|---|---|
 | `InMemoryAdapter` | Stubbed | Development, testing, demos |
 | `RedisAdapter` | Stubbed | Production, persistent state |
-| `ChromaAdapter` | Stub | Semantic search via ChromaDB |
-| `PineconeAdapter` | Stub | Production-scale vector search |
+| `ChromaAdapter` | Stubbed | Semantic search via ChromaDB |
+| `PineconeAdapter` | Stubbed | Production-scale vector search |
 
 To add a new backend, implement the `StorageAdapter` ABC in `engram/storage/base.py`:
 
@@ -250,7 +250,7 @@ engram/
 
 | Level | Behavior | Status |
 |---|---|---|
-| `eventual` | Return immediately from local storage. No coordination. | Implemented |
+| `eventual` | Return immediately from local storage. No coordination. | Stubbed |
 | `causal` | Verify the returned value does not violate causal ordering relative to the requesting agent. | Stub |
 | `strong` | Coordinate to confirm no pending writes exist before returning. | Stub |
 

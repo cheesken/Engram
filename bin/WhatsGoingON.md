@@ -97,7 +97,7 @@ The agent sends `GET /read/budget?agent_id=summarizer-1&role=summarizer`. **`eng
 
 This is where the three consistency levels differ:
 
-- **EVENTUAL** — Just return what's in storage. No extra checks. This is the default and the only one currently implemented.
+- **EVENTUAL** — Just return what's in storage. No extra checks. This is the default and the simplest to implement.
 
 - **CAUSAL** — Before returning, verify that the stored entry's vector clock doesn't violate causal ordering relative to what this agent has already seen. If agent A read a value at clock `{"A": 3}` and now storage returns clock `{"A": 2}`, that's a causal violation — the agent would be going backwards in time. *Not yet implemented — raises NotImplementedError.*
 
