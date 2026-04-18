@@ -146,6 +146,9 @@ curl "http://localhost:8000/read/budget?agent_id=summarizer-1&role=summarizer"
 
 ```bash
 git clone <repo-url> && cd Engram
+brew install python@3.12
+python3.12 -m venv venv
+source venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
 ```
