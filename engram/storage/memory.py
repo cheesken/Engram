@@ -37,7 +37,8 @@ class InMemoryAdapter(StorageAdapter):
         Args:
             entry: The MemoryEntry to store.
         """
-        raise NotImplementedError
+        with self._lock:
+            self._store[entry.key] = entry
 
     def read(self, key: str) -> Optional[MemoryEntry]:
         """
@@ -51,7 +52,8 @@ class InMemoryAdapter(StorageAdapter):
         Returns:
             The MemoryEntry if found, or None if the key does not exist.
         """
-        raise NotImplementedError
+        with self._lock:
+            return self._store.get(key)
 
     def write_history(self, entry: HistoryEntry) -> None:
         """
@@ -62,7 +64,8 @@ class InMemoryAdapter(StorageAdapter):
         Args:
             entry: The HistoryEntry to append.
         """
-        raise NotImplementedError
+        with self._lock:
+            self._history.append(entry)
 
     def read_history(
         self,
@@ -92,7 +95,21 @@ class InMemoryAdapter(StorageAdapter):
         Returns:
             A list of HistoryEntry objects matching the filters.
         """
-        raise NotImplementedError
+        with self._lock:
+            log = list(self._history)
+
+        results: list[HistoryEntry] = []
+        for entry in log:
+            if entry.key != key:
+                continue
+            if agent_id is not None and entry.agent_id != agent_id:
+                continue
+            if since is not None and entry.timestamp < since:
+                continue
+            if until is not None and entry.timestamp > until:
+                continue
+            results.append(entry)
+        return results
 
     def delete(self, key: str) -> None:
         """
@@ -104,7 +121,8 @@ class InMemoryAdapter(StorageAdapter):
         Args:
             key: The memory key to delete.
         """
-        raise NotImplementedError
+        with self._lock:
+            self._store.pop(key, None)
 
     def list_keys(self, prefix: Optional[str] = None) -> list[str]:
         """
@@ -118,7 +136,11 @@ class InMemoryAdapter(StorageAdapter):
         Returns:
             A sorted list of key strings.
         """
-        raise NotImplementedError
+        with self._lock:
+            keys = list(self._store.keys())
+        if prefix is None:
+            return sorted(keys)
+        return sorted(k for k in keys if k.startswith(prefix))
 
     def ping(self) -> bool:
         """
@@ -127,4 +149,4 @@ class InMemoryAdapter(StorageAdapter):
         Returns:
             True (in-memory storage is always available).
         """
-        raise NotImplementedError
+        return True

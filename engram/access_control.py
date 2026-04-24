@@ -11,9 +11,6 @@ import fnmatch
 from dataclasses import dataclass, field
 from typing import Optional
 
-from engram.models import RoleDefinition
-
-
 @dataclass
 class Role:
     """A role definition with read/write permission patterns."""
@@ -37,6 +34,12 @@ class AccessPolicy:
     def __init__(self) -> None:
         self._roles: dict[str, Role] = {}
 
+    @staticmethod
+    def _pattern_allows(pattern: str, key: str) -> bool:
+        if pattern == "*":
+            return True
+        return fnmatch.fnmatch(key, pattern)
+
     def register_role(
         self, role_name: str, can_read: list[str], can_write: list[str]
     ) -> None:
@@ -52,7 +55,11 @@ class AccessPolicy:
             can_write: List of key patterns this role can write. Use "*" for all keys.
                        An empty list means the role is read-only.
         """
-        raise NotImplementedError
+        self._roles[role_name] = Role(
+            role_name=role_name,
+            can_read=list(can_read),
+            can_write=list(can_write),
+        )
 
     def check_read(self, role: str, key: str) -> bool:
         """
@@ -72,7 +79,12 @@ class AccessPolicy:
         Returns:
             True if the read is permitted, False otherwise.
         """
-        raise NotImplementedError
+        r = self._roles.get(role)
+        if r is None:
+            return False
+        if "*" in r.can_read:
+            return True
+        return any(self._pattern_allows(p, key) for p in r.can_read)
 
     def check_write(self, role: str, key: str) -> bool:
         """
@@ -88,7 +100,14 @@ class AccessPolicy:
         Returns:
             True if the write is permitted, False otherwise.
         """
-        raise NotImplementedError
+        r = self._roles.get(role)
+        if r is None:
+            return False
+        if not r.can_write:
+            return False
+        if "*" in r.can_write:
+            return True
+        return any(self._pattern_allows(p, key) for p in r.can_write)
 
     def get_role(self, role_name: str) -> Optional[Role]:
         """
@@ -100,7 +119,7 @@ class AccessPolicy:
         Returns:
             The Role instance, or None if the role does not exist.
         """
-        raise NotImplementedError
+        return self._roles.get(role_name)
 
     def list_roles(self) -> list[str]:
         """
@@ -109,4 +128,4 @@ class AccessPolicy:
         Returns:
             A list of role name strings.
         """
-        raise NotImplementedError
+        return sorted(self._roles.keys())
