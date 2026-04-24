@@ -11,80 +11,52 @@ Key schema:
 
 from __future__ import annotations
 
+from ast import pattern
 from datetime import datetime
-from typing import Optional
+import os
+from typing import Optional, cast
 
 import redis
 
 from engram.models import HistoryEntry, MemoryEntry
 from engram.storage.base import StorageAdapter
+from dotenv import load_dotenv
 
+# Load variables from .env into the environment
+load_dotenv()
+
+_MEMORY_PREFIX = "engram:memory:"
+_HISTORY_PREFIX = "engram:history:"
 
 class RedisAdapter(StorageAdapter):
-    """
-    Redis-backed storage adapter.
 
-    Requires Redis running at REDIS_URL. Serializes all models to JSON
-    using model.model_dump_json(). Deserializes using model.model_validate_json().
+    def __init__(self):
+        # Get the URL from the environment, provide a fallback if missing
+        redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+        
+        # Use from_url to parse the connection string automatically
+        self._client = redis.from_url(redis_url, decode_responses=True)
 
-    Key schema:
-    - Live memory: "engram:memory:{key}"
-    - History entries: stored as a Redis List at "engram:history:{key}"
-    """
-
-    def __init__(self, redis_url: str) -> None:
-        """
-        Initialize the Redis client from the given URL.
-
-        Args:
-            redis_url: Redis connection URL (e.g. "redis://localhost:6379/0").
-        """
-        self._client = redis.Redis.from_url(redis_url, decode_responses=True)
 
     def write(self, entry: MemoryEntry) -> None:
-        """
-        Store the MemoryEntry as a JSON string using Redis SET.
-
-        Key: "engram:memory:{entry.key}"
-        Value: entry.model_dump_json()
-
-        Uses SET command to overwrite any existing value for this key.
-
-        Args:
-            entry: The MemoryEntry to store.
-        """
-        raise NotImplementedError
-
+        self._client.set(
+                    f"{_MEMORY_PREFIX}{entry.key}",
+                    entry.model_dump_json(),
+                )
+ 
     def read(self, key: str) -> Optional[MemoryEntry]:
-        """
-        Read the MemoryEntry from Redis using GET.
-
-        Key: "engram:memory:{key}"
-
-        If the key does not exist in Redis (GET returns None), return None.
-        Otherwise deserialize with MemoryEntry.model_validate_json(raw).
-
-        Args:
-            key: The memory key to look up.
-
-        Returns:
-            The MemoryEntry if found, or None.
-        """
-        raise NotImplementedError
-
+        raw = self._client.get(f"{_MEMORY_PREFIX}{key}")
+        if raw is None:
+            return None
+        if not isinstance(raw, (str, bytes, bytearray)):
+            return None
+        return MemoryEntry.model_validate_json(cast(str | bytes | bytearray, raw))
+    
     def write_history(self, entry: HistoryEntry) -> None:
-        """
-        Append a HistoryEntry to a Redis List using RPUSH.
-
-        Key: "engram:history:{entry.key}"
-        Value: entry.model_dump_json()
-
-        RPUSH appends to the end of the list, preserving chronological order.
-
-        Args:
-            entry: The HistoryEntry to append.
-        """
-        raise NotImplementedError
+        self._client.rpush(
+            f"{_HISTORY_PREFIX}{entry.key}",
+            entry.model_dump_json(),
+        )
 
     def read_history(
         self,
@@ -93,64 +65,29 @@ class RedisAdapter(StorageAdapter):
         since: Optional[datetime] = None,
         until: Optional[datetime] = None,
     ) -> list[HistoryEntry]:
-        """
-        Read all history entries for the given key from a Redis List using LRANGE.
+        raw_list = cast(list[str], self._client.lrange(f"{_HISTORY_PREFIX}{key}", 0, -1))
+        entries = [HistoryEntry.model_validate_json(raw) for raw in raw_list]
 
-        Key: "engram:history:{key}"
-        Command: LRANGE key 0 -1  (returns all elements)
+        if agent_id is not None:
+            entries = [e for e in entries if e.agent_id == agent_id]
+        if since is not None:
+            entries = [e for e in entries if e.timestamp >= since]
+        if until is not None:
+            entries = [e for e in entries if e.timestamp <= until]
 
-        Deserialize each element with HistoryEntry.model_validate_json().
-        Apply optional filters (agent_id, since, until) in Python after retrieval.
-
-        Args:
-            key: The memory key to look up history for.
-            agent_id: Optional filter by agent ID.
-            since: Optional lower bound on timestamp (inclusive).
-            until: Optional upper bound on timestamp (inclusive).
-
-        Returns:
-            A list of HistoryEntry objects matching the filters.
-        """
-        raise NotImplementedError
+        return entries  # already in insertion (oldest-first) order
 
     def delete(self, key: str) -> None:
-        """
-        Delete the MemoryEntry from Redis using DEL.
-
-        Key: "engram:memory:{key}"
-
-        No-op if the key does not exist (Redis DEL handles this gracefully).
-
-        Args:
-            key: The memory key to delete.
-        """
-        raise NotImplementedError
+        self._client.delete(f"{_MEMORY_PREFIX}{key}")
 
     def list_keys(self, prefix: Optional[str] = None) -> list[str]:
-        """
-        List all memory keys in Redis using KEYS.
-
-        Pattern: "engram:memory:{prefix}*" if prefix is provided,
-                 "engram:memory:*" otherwise.
-
-        Strip the "engram:memory:" prefix from each result before returning.
-
-        Note: KEYS is O(N) and should not be used in production with large
-        datasets. Consider SCAN for production use.
-
-        Args:
-            prefix: If provided, only return keys that start with this prefix.
-
-        Returns:
-            A list of key strings (without the "engram:memory:" prefix).
-        """
-        raise NotImplementedError
+        pattern = f"{_MEMORY_PREFIX}{prefix or ''}*"
+        raw_keys = cast(list[str], self._client.keys(pattern))
+        stripped = [k.removeprefix(_MEMORY_PREFIX) for k in raw_keys]
+        return sorted(stripped)
 
     def ping(self) -> bool:
-        """
-        Check Redis connectivity using the PING command.
-
-        Returns:
-            True if Redis responds to PING, False if an exception occurs.
-        """
-        raise NotImplementedError
+        try:
+            return bool(self._client.ping())
+        except Exception:
+            return False
