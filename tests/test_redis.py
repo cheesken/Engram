@@ -11,6 +11,7 @@ Run with:
 """
 
 from datetime import datetime, timedelta, timezone
+import os
 from typing import Any
 from uuid import uuid4
 
@@ -25,7 +26,8 @@ from engram.storage.redis_adapter import RedisAdapter
 
 @pytest.fixture(scope="module")
 def adapter():
-    r = RedisAdapter()
+    redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+    r = RedisAdapter(redis_url)
     if not r.ping():
         pytest.skip("Redis is not running — start with: docker compose up -d")
     return r
@@ -98,7 +100,8 @@ class TestPing:
 
     def test_ping_returns_false_when_unreachable(self, monkeypatch):
         """If the client ping fails, adapter.ping() should return False, not raise."""
-        bad = RedisAdapter()
+        redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+        bad = RedisAdapter(redis_url)
 
         def _raise_ping_error(*args, **kwargs):
             raise RuntimeError("Redis is unreachable")
