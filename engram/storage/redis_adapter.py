@@ -30,7 +30,7 @@ _HISTORY_PREFIX = "engram:history:"
 
 class RedisAdapter(StorageAdapter):
 
-    def __init__(self):
+    def __init__(self, redis_url: str) -> None: 
         # Get the URL from the environment, provide a fallback if missing
         redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
         
