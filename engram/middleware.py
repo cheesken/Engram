@@ -14,10 +14,13 @@ from engram.access_control import AccessPolicy
 from engram.crdt import MVRegister
 from engram.history import HistoryLog
 from engram.models import (
+    ConflictStrategy,
+    ConflictingWrite,
     ConsistencyLevel,
     HistoryEntry,
     MemoryEntry,
     MemoryStatus,
+    Ordering,
     ReadRequest,
     RollbackRequest,
     WriteRequest,
@@ -122,7 +125,91 @@ class EngramMiddleware:
             HTTPException(403): If the role lacks write permission for this key.
             HTTPException(409): If the incoming write is stale (AFTER ordering).
         """
-        raise NotImplementedError
+        if not self.access_policy.check_write(request.role, request.key):
+            raise HTTPException(
+                status_code=403,
+                detail=f"Role '{request.role}' cannot write key '{request.key}'",
+            )
+
+        incoming_clock = VectorClock.from_dict(request.vector_clock).increment(
+            request.agent_id
+        )
+
+        existing = self.storage.read(request.key)
+        resolved_value = request.value
+        conflicting_writes: list[ConflictingWrite] = []
+        status = MemoryStatus.OK
+        final_clock = incoming_clock
+
+        if existing is not None:
+            existing_clock = VectorClock.from_dict(existing.vector_clock)
+            ordering = existing_clock.compare(incoming_clock)
+
+            if ordering == Ordering.AFTER:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Stale write: incoming clock is behind the stored entry"
+                    ),
+                )
+
+            if ordering == Ordering.CONCURRENT:
+                register = MVRegister()
+                existing_conflicts = list(existing.conflicting_writes)
+                register._values = [
+                    ConflictingWrite(
+                        write_id=existing.write_id,
+                        agent_id=existing.agent_id,
+                        role=existing.role,
+                        value=existing.value,
+                        vector_clock=dict(existing.vector_clock),
+                        timestamp=existing.timestamp,
+                    ),
+                    *existing_conflicts,
+                ]
+
+                register = register.write(
+                    request.value,
+                    request.agent_id,
+                    request.role,
+                    incoming_clock,
+                )
+
+                resolved_value, conflicting_writes = register.resolve(
+                    request.conflict_strategy
+                )
+                if request.conflict_strategy == ConflictStrategy.FLAG_FOR_HUMAN:
+                    status = MemoryStatus.FLAGGED
+                elif register.is_conflicted():
+                    status = MemoryStatus.CONFLICTED
+
+            final_clock = incoming_clock.merge(existing_clock)
+
+        entry = MemoryEntry(
+            key=request.key,
+            value=resolved_value,
+            agent_id=request.agent_id,
+            role=request.role,
+            vector_clock=final_clock.to_dict(),
+            consistency_level=request.consistency_level,
+            conflict_strategy=request.conflict_strategy,
+            status=status,
+            conflicting_writes=conflicting_writes,
+        )
+
+        history_entry = HistoryEntry(
+            write_id=entry.write_id,
+            key=entry.key,
+            value=entry.value,
+            agent_id=entry.agent_id,
+            role=entry.role,
+            vector_clock=entry.vector_clock,
+            timestamp=entry.timestamp,
+            write_type=WriteType.WRITE,
+        )
+        self.history_log.append(history_entry)
+        self.storage.write(entry)
+        return entry
 
     def read(self, key: str, request: ReadRequest) -> MemoryEntry:
         """
@@ -157,7 +244,29 @@ class EngramMiddleware:
             HTTPException(404): If the key does not exist in storage.
             NotImplementedError: If consistency level is CAUSAL or STRONG.
         """
-        raise NotImplementedError
+        if not self.access_policy.check_read(request.role, key):
+            raise HTTPException(
+                status_code=403,
+                detail=f"Role '{request.role}' cannot read key '{key}'",
+            )
+
+        entry = self.storage.read(key)
+        if entry is None:
+            raise HTTPException(status_code=404, detail=f"Key '{key}' not found")
+
+        if request.consistency_level == ConsistencyLevel.EVENTUAL:
+            return entry
+        if request.consistency_level == ConsistencyLevel.CAUSAL:
+            raise NotImplementedError(
+                "Causal consistency requires validating the returned clock against "
+                "the caller's known clock, which is not implemented yet."
+            )
+        if request.consistency_level == ConsistencyLevel.STRONG:
+            raise NotImplementedError(
+                "Strong consistency requires coordination with all nodes, which is "
+                "not implemented yet."
+            )
+        return entry
 
     def rollback(self, write_id: str, request: RollbackRequest) -> MemoryEntry:
         """
@@ -186,4 +295,54 @@ class EngramMiddleware:
             HTTPException(404): If the write_id is not found in history.
             HTTPException(403): If the role lacks write permission for the key.
         """
-        raise NotImplementedError
+        original = self.history_log.get_entry(write_id)
+        if original is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No history entry found for write_id '{write_id}'",
+            )
+
+        if not self.access_policy.check_write(
+            request.initiating_role, original.key
+        ):
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    f"Role '{request.initiating_role}' cannot write key '{original.key}'"
+                ),
+            )
+
+        rollback_entry = self.history_log.create_rollback_entry(
+            write_id=write_id,
+            initiating_agent_id=request.initiating_agent_id,
+            initiating_role=request.initiating_role,
+        )
+        self.history_log.append(rollback_entry)
+
+        current = self.storage.read(original.key)
+        consistency_level = (
+            current.consistency_level
+            if current is not None
+            else ConsistencyLevel.EVENTUAL
+        )
+        conflict_strategy = (
+            current.conflict_strategy
+            if current is not None
+            else ConflictStrategy.LATEST_CLOCK
+        )
+
+        entry = MemoryEntry(
+            write_id=rollback_entry.write_id,
+            key=rollback_entry.key,
+            value=rollback_entry.value,
+            agent_id=rollback_entry.agent_id,
+            role=rollback_entry.role,
+            vector_clock=dict(rollback_entry.vector_clock),
+            consistency_level=consistency_level,
+            conflict_strategy=conflict_strategy,
+            status=MemoryStatus.OK,
+            conflicting_writes=[],
+            timestamp=rollback_entry.timestamp,
+        )
+        self.storage.write(entry)
+        return entry
