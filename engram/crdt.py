@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Any
+from uuid import uuid4
 
 from engram.models import ConflictStrategy, ConflictingWrite, Ordering
 from engram.vector_clock import VectorClock
@@ -61,7 +62,39 @@ class MVRegister:
         Returns:
             A new MVRegister reflecting the updated state.
         """
-        raise NotImplementedError
+        new_value = ConflictingWrite(
+            write_id=str(uuid4()),
+            agent_id=agent_id,
+            role=role,
+            value=value,
+            vector_clock=clock.to_dict(),
+            timestamp=datetime.now(timezone.utc),
+        )
+
+        if not self._values:
+            reg = MVRegister()
+            reg._values = [new_value]
+            return reg
+
+        has_concurrent = False
+        concurrent_values: list[ConflictingWrite] = []
+        for existing in self._values:
+            existing_clock = VectorClock.from_dict(existing.vector_clock)
+            ordering = existing_clock.compare(clock)
+
+            if ordering == Ordering.AFTER:
+                return self
+            if ordering == Ordering.CONCURRENT:
+                has_concurrent = True
+                concurrent_values.append(existing)
+
+        reg = MVRegister()
+        if has_concurrent:
+            reg._values = [*concurrent_values, new_value]
+            return reg
+
+        reg._values = [new_value]
+        return reg
 
     def merge(self, other: MVRegister) -> MVRegister:
         """
@@ -81,7 +114,35 @@ class MVRegister:
         Returns:
             A new MVRegister containing the merged set of non-dominated values.
         """
-        raise NotImplementedError
+        all_values = list(self._values) + list(other._values)
+        if not all_values:
+            return MVRegister()
+
+        non_dominated: list[ConflictingWrite] = []
+        for candidate in all_values:
+            candidate_clock = VectorClock.from_dict(candidate.vector_clock)
+            dominated = False
+            for other_value in all_values:
+                if other_value is candidate:
+                    continue
+                other_clock = VectorClock.from_dict(other_value.vector_clock)
+                if candidate_clock.compare(other_clock) == Ordering.BEFORE:
+                    dominated = True
+                    break
+            if not dominated:
+                non_dominated.append(candidate)
+
+        seen: set[str] = set()
+        deduped: list[ConflictingWrite] = []
+        for value in non_dominated:
+            if value.write_id in seen:
+                continue
+            seen.add(value.write_id)
+            deduped.append(value)
+
+        reg = MVRegister()
+        reg._values = list(deduped)
+        return reg
 
     def resolve(
         self, strategy: ConflictStrategy
@@ -110,7 +171,36 @@ class MVRegister:
             ValueError: If strategy is LOWEST_VALUE or HIGHEST_VALUE and values
                         are not comparable.
         """
-        raise NotImplementedError
+        if not self._values:
+            return None, []
+
+        if len(self._values) == 1:
+            return self._values[0].value, []
+
+        if strategy == ConflictStrategy.UNION:
+            return [v.value for v in self._values], []
+        if strategy == ConflictStrategy.FLAG_FOR_HUMAN:
+            return None, list(self._values)
+
+        if strategy in (ConflictStrategy.LOWEST_VALUE, ConflictStrategy.HIGHEST_VALUE):
+            try:
+                winner = (
+                    min(self._values, key=lambda v: v.value)
+                    if strategy == ConflictStrategy.LOWEST_VALUE
+                    else max(self._values, key=lambda v: v.value)
+                )
+            except TypeError as exc:
+                raise ValueError("Values are not comparable") from exc
+        elif strategy == ConflictStrategy.LATEST_CLOCK:
+            winner = max(
+                self._values,
+                key=lambda v: (sum(v.vector_clock.values()), v.timestamp),
+            )
+        else:
+            winner = self._values[0]
+
+        losers = [v for v in self._values if v.write_id != winner.write_id]
+        return winner.value, losers
 
     def is_conflicted(self) -> bool:
         """
@@ -120,7 +210,7 @@ class MVRegister:
         Returns:
             True if conflicted, False otherwise.
         """
-        raise NotImplementedError
+        return len(self._values) >= 2
 
     @property
     def values(self) -> list[ConflictingWrite]:
@@ -130,4 +220,4 @@ class MVRegister:
         Returns:
             A list of ConflictingWrite objects (copy, not reference).
         """
-        raise NotImplementedError
+        return list(self._values)
