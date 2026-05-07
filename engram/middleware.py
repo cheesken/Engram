@@ -183,26 +183,60 @@ class EngramMiddleware:
                 elif register.is_conflicted():
                     status = MemoryStatus.CONFLICTED
 
-            final_clock = incoming_clock.merge(existing_clock)
+                # Find which ConflictingWrite has the resolved_value to get correct agent_id and write_id
+                resolved_agent_id = request.agent_id
+                resolved_role = request.role
+                resolved_write_id = None
+                for v in register._values:
+                    if v.value == resolved_value:
+                        resolved_agent_id = v.agent_id
+                        resolved_role = v.role
+                        resolved_write_id = v.write_id
+                        break
+            else:
+                resolved_agent_id = request.agent_id
+                resolved_role = request.role
+                resolved_write_id = None
 
-        entry = MemoryEntry(
-            key=request.key,
-            value=resolved_value,
-            agent_id=request.agent_id,
-            role=request.role,
-            vector_clock=final_clock.to_dict(),
-            consistency_level=request.consistency_level,
-            conflict_strategy=request.conflict_strategy,
-            status=status,
-            conflicting_writes=conflicting_writes,
-        )
+            final_clock = incoming_clock.merge(existing_clock)
+        else:
+            resolved_agent_id = request.agent_id
+            resolved_role = request.role
+            resolved_write_id = None
+
+        # Use the winner's write_id if from a conflict, otherwise generate new
+        if resolved_write_id:
+            entry = MemoryEntry(
+                write_id=resolved_write_id,
+                key=request.key,
+                value=resolved_value,
+                agent_id=resolved_agent_id,
+                role=resolved_role,
+                vector_clock=final_clock.to_dict(),
+                consistency_level=request.consistency_level,
+                conflict_strategy=request.conflict_strategy,
+                status=status,
+                conflicting_writes=conflicting_writes,
+            )
+        else:
+            entry = MemoryEntry(
+                key=request.key,
+                value=resolved_value,
+                agent_id=resolved_agent_id,
+                role=resolved_role,
+                vector_clock=final_clock.to_dict(),
+                consistency_level=request.consistency_level,
+                conflict_strategy=request.conflict_strategy,
+                status=status,
+                conflicting_writes=conflicting_writes,
+            )
 
         history_entry = HistoryEntry(
             write_id=entry.write_id,
             key=entry.key,
             value=request.value,
-            agent_id=entry.agent_id,
-            role=entry.role,
+            agent_id=request.agent_id,
+            role=request.role,
             vector_clock=entry.vector_clock,
             timestamp=entry.timestamp,
             write_type=WriteType.WRITE,
@@ -320,29 +354,143 @@ class EngramMiddleware:
         self.history_log.append(rollback_entry)
 
         current = self.storage.read(original.key)
-        consistency_level = (
-            current.consistency_level
-            if current is not None
-            else ConsistencyLevel.EVENTUAL
-        )
-        conflict_strategy = (
-            current.conflict_strategy
-            if current is not None
-            else ConflictStrategy.LATEST_CLOCK
+        
+        # If no current entry, restore the rolled-back value
+        if current is None:
+            entry = MemoryEntry(
+                write_id=rollback_entry.write_id,
+                key=rollback_entry.key,
+                value=rollback_entry.value,
+                agent_id=rollback_entry.agent_id,
+                role=rollback_entry.role,
+                vector_clock={},
+                consistency_level=ConsistencyLevel.EVENTUAL,
+                conflict_strategy=ConflictStrategy.LATEST_CLOCK,
+                status=MemoryStatus.OK,
+                conflicting_writes=[],
+                timestamp=rollback_entry.timestamp,
+            )
+            self.storage.write(entry)
+            return entry
+
+        consistency_level = current.consistency_level
+        conflict_strategy = current.conflict_strategy
+
+        # Check if the rolled-back write is in the conflicting_writes
+        is_rolled_back_in_conflicts = any(
+            c.write_id == write_id for c in current.conflicting_writes
         )
 
+        # Check if the rolled-back write is the current main value
+        is_main_value_rolled_back = current.write_id == write_id
+
+        if is_rolled_back_in_conflicts:
+            # Case 1: Concurrent write in conflict set - exclude and re-resolve
+            remaining_conflicts = [
+                w for w in current.conflicting_writes 
+                if w.write_id != write_id
+            ]
+            
+            if not remaining_conflicts:
+                # No conflicts remain - main value stays
+                resolved_value = current.value
+                status = MemoryStatus.OK
+                final_conflicts = []
+                new_write_id = current.write_id
+                new_agent_id = current.agent_id
+                new_role = current.role
+                new_vector_clock = dict(current.vector_clock)
+                new_timestamp = current.timestamp
+            else:
+                # Still has conflicts - re-resolve
+                register = MVRegister()
+                register._values = [
+                    ConflictingWrite(
+                        write_id=c.write_id,
+                        agent_id=c.agent_id,
+                        role=c.role,
+                        value=c.value,
+                        vector_clock=dict(c.vector_clock),
+                        timestamp=c.timestamp,
+                    )
+                    for c in remaining_conflicts
+                ]
+                # Add the main value back to re-resolve
+                register._values.insert(0, ConflictingWrite(
+                    write_id=current.write_id,
+                    agent_id=current.agent_id,
+                    role=current.role,
+                    value=current.value,
+                    vector_clock=dict(current.vector_clock),
+                    timestamp=current.timestamp,
+                ))
+                resolved_value, final_conflicts = register.resolve(conflict_strategy)
+                status = MemoryStatus.CONFLICTED if register.is_conflicted() else MemoryStatus.OK
+                new_write_id = current.write_id
+                new_agent_id = current.agent_id
+                new_role = current.role
+                new_vector_clock = dict(current.vector_clock)
+                new_timestamp = current.timestamp
+
+        elif is_main_value_rolled_back:
+            # Case 2: Main value is being rolled back
+            if current.conflicting_writes:
+                # Conflicts exist - promote the best conflict to be the new main value
+                register = MVRegister()
+                register._values = [
+                    ConflictingWrite(
+                        write_id=c.write_id,
+                        agent_id=c.agent_id,
+                        role=c.role,
+                        value=c.value,
+                        vector_clock=dict(c.vector_clock),
+                        timestamp=c.timestamp,
+                    )
+                    for c in current.conflicting_writes
+                ]
+                resolved_value, final_conflicts = register.resolve(conflict_strategy)
+                status = MemoryStatus.CONFLICTED if register.is_conflicted() else MemoryStatus.OK
+                
+                # Use the first conflict's metadata for the promoted value
+                promoted = current.conflicting_writes[0]
+                new_write_id = promoted.write_id
+                new_agent_id = promoted.agent_id
+                new_role = promoted.role
+                new_vector_clock = dict(promoted.vector_clock)
+                new_timestamp = promoted.timestamp
+            else:
+                # No conflicts - restore the rolled-back value
+                resolved_value = original.value
+                status = MemoryStatus.OK
+                final_conflicts = []
+                new_write_id = rollback_entry.write_id
+                new_agent_id = rollback_entry.agent_id
+                new_role = rollback_entry.role
+                new_vector_clock = {}
+                new_timestamp = rollback_entry.timestamp
+        else:
+            # Case 3: Write is not in current state (was overwritten) - restore the rolled-back value
+            resolved_value = original.value
+            status = MemoryStatus.OK
+            final_conflicts = []
+            new_write_id = rollback_entry.write_id
+            new_agent_id = rollback_entry.agent_id
+            new_role = rollback_entry.role
+            new_vector_clock = {}
+            new_timestamp = rollback_entry.timestamp
+
         entry = MemoryEntry(
-            write_id=rollback_entry.write_id,
-            key=rollback_entry.key,
-            value=rollback_entry.value,
-            agent_id=rollback_entry.agent_id,
-            role=rollback_entry.role,
-            vector_clock=dict(rollback_entry.vector_clock),
+            write_id=new_write_id,
+            key=original.key,
+            value=resolved_value,
+            agent_id=new_agent_id,
+            role=new_role,
+            vector_clock=new_vector_clock,
             consistency_level=consistency_level,
             conflict_strategy=conflict_strategy,
-            status=MemoryStatus.OK,
-            conflicting_writes=[],
-            timestamp=rollback_entry.timestamp,
+            status=status,
+            conflicting_writes=final_conflicts,
+            timestamp=new_timestamp,
         )
         self.storage.write(entry)
         return entry
